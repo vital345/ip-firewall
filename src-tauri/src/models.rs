@@ -7,7 +7,7 @@ pub const BLOCK_END: &str = "# IP-FIREWALL:END";
 pub struct BlockerState {
     pub enabled: bool,
     pub domain_count: usize,
-    pub blocked_requests: u64,
+    pub observed_blocked_requests: u64,
     pub hosts_path: String,
     pub operating_system: String,
     pub sinkhole_backend: String,

@@ -35,6 +35,15 @@ pub fn open_database(app: &AppHandle) -> Result<(Connection, PathBuf), String> {
                 redirect TEXT NOT NULL DEFAULT '0.0.0.0',
                 notes TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS filter_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule TEXT NOT NULL,
+                source TEXT NOT NULL,
+                category TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                added_at TEXT NOT NULL,
+                UNIQUE(rule, source)
+            );
             CREATE TABLE IF NOT EXISTS activity_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at TEXT NOT NULL,

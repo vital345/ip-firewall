@@ -196,7 +196,7 @@ pub fn blocker_state(
     crate::models::BlockerState {
         enabled: hosts.contains(BLOCK_START),
         domain_count,
-        blocked_requests,
+        observed_blocked_requests: blocked_requests,
         hosts_path: hosts_path().display().to_string(),
         operating_system: operating_system_name(),
         sinkhole_backend: backend.name(),

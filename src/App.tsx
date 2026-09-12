@@ -12,7 +12,7 @@ import "./App.css";
 type BlockerState = {
   enabled: boolean;
   domain_count: number;
-  blocked_requests: number;
+  observed_blocked_requests: number;
   hosts_path: string;
   operating_system: string;
   sinkhole_backend: string;
@@ -50,7 +50,7 @@ const initialData: DashboardData = {
   state: {
     enabled: false,
     domain_count: 0,
-    blocked_requests: 0,
+    observed_blocked_requests: 0,
     hosts_path: "",
     operating_system: "Cross-platform",
     sinkhole_backend: "Hosts file sinkhole",
@@ -178,12 +178,21 @@ function App() {
   }
 
   async function exportBlocklistCsv() {
-    const csv = ["domain,category,source,enabled,redirect,notes", ...data.blocklist.map((entry) =>
-      [entry.domain, entry.category, entry.source, entry.enabled, entry.redirect, entry.notes]
-        .map((value) => `"${String(value).split('"').join('""')}"`)
-        .join(","),
-    )]
-      .join("\r\n");
+    const csv = [
+      "domain,category,source,enabled,redirect,notes",
+      ...data.blocklist.map((entry) =>
+        [
+          entry.domain,
+          entry.category,
+          entry.source,
+          entry.enabled,
+          entry.redirect,
+          entry.notes,
+        ]
+          .map((value) => `"${String(value).split('"').join('""')}"`)
+          .join(","),
+      ),
+    ].join("\r\n");
     const path = await save({
       defaultPath: "ip-firewall-blocklist.csv",
       filters: [{ name: "CSV file", extensions: ["csv"] }],
@@ -442,9 +451,11 @@ function App() {
             </section>
             <section className="metrics">
               <article className="metric-card">
-                <span className="metric-label">BLOCKED REQUESTS</span>
-                <strong>{state.blocked_requests}</strong>
-                <span className="metric-note">Recorded sinkhole domains</span>
+                <span className="metric-label">OBSERVED BLOCKED REQUESTS</span>
+                <strong>{state.observed_blocked_requests}</strong>
+                <span className="metric-note">
+                  Requires a DNS proxy backend
+                </span>
               </article>
               <article className="metric-card accent">
                 <span className="metric-label">DOMAINS COVERED</span>
@@ -619,7 +630,9 @@ function App() {
                     <option value="advertising">Advertising</option>
                     <option value="tracking">Tracking</option>
                     <option value="analytics">Analytics</option>
-                    <option value="infrastructure">Service infrastructure</option>
+                    <option value="infrastructure">
+                      Service infrastructure
+                    </option>
                   </select>
                   <input
                     aria-label="Domain source"

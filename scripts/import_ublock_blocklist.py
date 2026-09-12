@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Import hostname rules from a uBlock filter list into the app SQLite database."""
+"""Import uBlock filter rules and hostname rules into the app SQLite database."""
 
 from __future__ import annotations
+
 import argparse
 import os
 import re
@@ -47,6 +48,24 @@ def extract_domains(contents: str) -> list[str]:
     return sorted(domains)
 
 
+def extract_rules(contents: str) -> list[tuple[str, str]]:
+    rules: dict[str, str] = {}
+    for line in contents.splitlines():
+        rule = line.strip()
+        if not rule or rule.startswith("!"):
+            continue
+        if "##+js(" in rule or "$scriptlet" in rule:
+            category = "scriptlet"
+        elif "##" in rule or "#@#" in rule:
+            category = "cosmetic"
+        elif "$redirect=" in rule or "$removeparam=" in rule:
+            category = "redirect"
+        else:
+            category = "network"
+        rules.setdefault(rule, category)
+    return sorted(rules.items())
+
+
 def ensure_schema(connection: sqlite3.Connection) -> None:
     connection.execute("""
         CREATE TABLE IF NOT EXISTS blocked_domains (
@@ -61,6 +80,17 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             notes TEXT NOT NULL DEFAULT ''
         )
         """)
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS filter_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule TEXT NOT NULL,
+            source TEXT NOT NULL,
+            category TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            added_at TEXT NOT NULL,
+            UNIQUE(rule, source)
+        )
+        """)
     for name, definition in (
         ("category", "TEXT NOT NULL DEFAULT 'advertising'"),
         ("source", "TEXT NOT NULL DEFAULT 'legacy'"),
@@ -69,15 +99,17 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
         ("notes", "TEXT NOT NULL DEFAULT ''"),
     ):
         try:
-            connection.execute(f"ALTER TABLE blocked_domains ADD COLUMN {name} {definition}")
+            connection.execute(
+                f"ALTER TABLE blocked_domains ADD COLUMN {name} {definition}"
+            )
         except sqlite3.OperationalError as error:
             if "duplicate column name" not in str(error).lower():
                 raise
 
 
 def import_domains(
-    database: Path, domains: list[str], dry_run: bool
-) -> tuple[int, int]:
+    database: Path, domains: list[str], rules: list[tuple[str, str]], dry_run: bool
+) -> tuple[int, int, int, int]:
     if not database.exists():
         raise FileNotFoundError(
             f"Database not found: {database}. Start IP Firewall once or pass --database."
@@ -91,9 +123,24 @@ def import_domains(
             for row in connection.execute("SELECT domain FROM blocked_domains")
         }
         new_domains = [domain for domain in domains if domain not in existing]
+        existing_rules = {
+            row[0]
+            for row in connection.execute(
+                "SELECT rule FROM filter_rules WHERE source = 'uBlock import'"
+            )
+        }
+        new_rules = [rule for rule in rules if rule[0] not in existing_rules]
 
         if not dry_run:
             timestamp = str(int(time.time()))
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO filter_rules
+                (rule, source, category, enabled, added_at)
+                VALUES (?, 'uBlock import', ?, 1, ?)
+                """,
+                [(rule, category, timestamp) for rule, category in new_rules],
+            )
             connection.executemany(
                 """
                 INSERT OR IGNORE INTO blocked_domains
@@ -103,14 +150,14 @@ def import_domains(
                 [(domain, timestamp) for domain in new_domains],
             )
             connection.commit()
-        return len(new_domains), len(existing)
+        return len(new_domains), len(existing), len(new_rules), len(existing_rules)
     finally:
         connection.close()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Import uBlock hostname rules into the IP Firewall blocklist."
+        description="Import uBlock filter rules into the IP Firewall database."
     )
     parser.add_argument(
         "--database",
@@ -135,7 +182,10 @@ def main() -> int:
     try:
         contents = fetch_filter_list(args.url, args.timeout)
         domains = extract_domains(contents)
-        added, existing = import_domains(args.database, domains, args.dry_run)
+        rules = extract_rules(contents)
+        added, existing, rules_added, rules_existing = import_domains(
+            args.database, domains, rules, args.dry_run
+        )
     except (OSError, sqlite3.Error, ValueError) as error:
         print(f"Import failed: {error}", file=sys.stderr)
         return 1
@@ -143,6 +193,10 @@ def main() -> int:
     action = "would be added" if args.dry_run else "added"
     print(f"Parsed {len(domains)} valid hostname rules from the filter list.")
     print(f"{added} new domains {action}; {existing} existing domains preserved.")
+    print(
+        f"{rules_added} full filter rules {action}; "
+        f"{rules_existing} existing rules preserved."
+    )
     if args.dry_run:
         print("Dry run: the database was not modified.")
     else:

@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::sync::Mutex;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 use crate::database::{ensure_blocklist, load_events, now_string, open_database, record_event};
+use crate::dns_proxy::DnsProxyHandle;
 use crate::models::{DashboardData, BLOCK_START};
 use crate::sinkhole::{
     blocker_state, can_write_hosts_file, normalize_domain, read_hosts, write_blocker,
@@ -35,7 +37,7 @@ pub fn get_dashboard(app: AppHandle) -> Result<DashboardData, String> {
             [],
             |row| row.get::<_, u64>(0),
         )
-        .map_err(|error| format!("Unable to count blocked requests: {error}"))?;
+        .map_err(|error| format!("Unable to count observed blocked requests: {error}"))?;
 
     Ok(DashboardData {
         state: blocker_state(&hosts, blocked_requests, blocklist.len()),
@@ -46,14 +48,30 @@ pub fn get_dashboard(app: AppHandle) -> Result<DashboardData, String> {
 }
 
 #[tauri::command]
-pub fn set_blocker_enabled(app: AppHandle, enabled: bool) -> Result<DashboardData, String> {
+pub fn set_blocker_enabled(
+    app: AppHandle,
+    enabled: bool,
+    dns_proxy: State<'_, Mutex<DnsProxyHandle>>,
+) -> Result<DashboardData, String> {
     if !can_write_hosts_file() {
         return Err(
             "This environment cannot modify the system hosts file. Run as administrator or use a supported hosts-editing environment.".to_string(),
         );
     }
 
-    write_blocker(&app, enabled)?;
+    let mut proxy = dns_proxy
+        .lock()
+        .map_err(|_| "Unable to access the DNS proxy state.".to_string())?;
+    if enabled {
+        proxy.start(app.clone())?;
+        if let Err(error) = write_blocker(&app, true) {
+            proxy.stop();
+            return Err(error);
+        }
+    } else {
+        write_blocker(&app, false)?;
+        proxy.stop();
+    }
     record_event(
         &app,
         "system",

@@ -165,7 +165,9 @@ nav {
 
 .admin-input-row {
   display: grid;
-  grid-template-columns: minmax(180px, 2fr) auto minmax(100px, 1fr) minmax(140px, 1.5fr) auto;
+  grid-template-columns:
+    minmax(180px, 2fr) auto minmax(100px, 1fr) minmax(140px, 1.5fr)
+    auto;
   gap: 12px;
 }
 

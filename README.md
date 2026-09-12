@@ -4,20 +4,47 @@ Device-wide advertisement filtering. IP Firewall maintains a clearly marked bloc
 
 ## Run
 
+From PowerShell in the project directory, install the frontend dependencies and start the Tauri desktop app:
+
 ```bash
 npm install
 npm run tauri dev
 ```
 
-Run the desktop app as administrator before enabling protection. The app only edits the block between `# IP-FIREWALL:START` and `# IP-FIREWALL:END`, leaving the rest of the hosts file untouched.
+On Windows, start PowerShell or VS Code as **Administrator** before running the app. Administrator privileges are required when you enable protection because IP Firewall edits `C:\Windows\System32\drivers\etc\hosts`. The app only edits the block between `# IP-FIREWALL:START` and `# IP-FIREWALL:END`, leaving the rest of the hosts file untouched.
 
-This is DNS-level device filtering, not arbitrary packet inspection. Edge's Secure DNS setting can bypass the hosts file by resolving through an encrypted provider; turn off Secure DNS in Edge if you want it to use this device-wide blocklist. Full packet-level dropping on Windows requires a Windows Filtering Platform driver.
+To verify the project without starting the desktop window:
+
+```bash
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+This is DNS-level device filtering, not arbitrary packet inspection. When protection is enabled, IP Firewall also starts a local DNS proxy on `127.0.0.1:53`: blocked domains and their subdomains receive an `NXDOMAIN` response, while allowed queries are forwarded to `1.1.1.1`. Configure the active Windows network adapter to use `127.0.0.1` as its DNS server for other applications to use the proxy. Edge Secure DNS must be disabled or configured to use the operating-system resolver; otherwise it can bypass both the proxy and hosts file. Full packet-level dropping on Windows requires a Windows Filtering Platform driver.
+
+On Windows, list the active adapters with:
+
+```powershell
+Get-NetAdapter | Where-Object Status -eq "Up" | Select-Object Name, InterfaceAlias
+```
+
+After starting IP Firewall, point the active adapter at the local proxy:
+
+```powershell
+Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ServerAddresses 127.0.0.1
+```
+
+Replace `Wi-Fi` with the adapter alias shown on your machine. Restore automatic DNS when the proxy is stopped with:
+
+```powershell
+Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ResetServerAddresses
+```
 
 ## Data and activity
 
 The app stores its local SQLite database as `ip-firewall.sqlite3` in the Tauri application data directory. Overview, Activity, and Blocklist are live views backed by the database and refresh every two seconds. Protection enable/disable operations are recorded immediately.
 
-The hosts-file mode cannot observe individual packets or DNS matches after they leave the operating system resolver. Activity records configuration changes and does not fabricate blocked or unfiltered DNS events. Real-time blocked and allowed-domain telemetry requires a local DNS proxy or a platform-specific DNS monitoring backend.
+The DNS proxy records actual blocked and forwarded DNS queries as activity events. The hosts-file fallback remains unable to observe individual packets or DNS matches after they leave the operating system resolver.
 
 ## Import uBlock domains
 
@@ -33,7 +60,9 @@ Apply the import with:
 npm run import:ublock
 ```
 
-The importer extracts network rules in the form `||hostname^`, ignores cosmetic and script-only filters, preserves existing domains, and inserts imported domains as admin-managed entries. Imported entries are tagged with `category=advertising` and `source=uBlock import`. To target another database, pass `--database path/to/ip-firewall.sqlite3`.
+The importer needs the app to have been started once so its SQLite database exists. Close IP Firewall before applying the import, then reopen it to see the imported entries. Use `--dry-run` first if you only want to preview how many domains would be added.
+
+The importer preserves every non-comment uBlock rule in the `filter_rules` table, including network, cosmetic, scriptlet, and redirect rules. It separately extracts simple `||hostname^` rules into `blocked_domains` because only those hostname rules can be applied by the current hosts-file sinkhole. Imported entries are tagged with `source=uBlock import`. To target another database, pass `--database path/to/ip-firewall.sqlite3`.
 
 # Tauri + React + Typescript
 
@@ -138,7 +167,7 @@ This separation keeps UI commands thin and prevents database or operating-system
 
 ### Database
 
-The application uses SQLite with two primary tables:
+The application uses SQLite with three primary tables:
 
 ```text
 blocked_domains
@@ -159,6 +188,14 @@ activity_events
 	domain
 	action
 	detail
+
+filter_rules
+	id
+	rule
+	source
+	category
+	enabled
+	added_at
 ```
 
 The database is stored in the Tauri application-data directory as `ip-firewall.sqlite3`. On first use, the schema is created and the SQL seed file is inserted only when the blocklist is empty. Existing administrator changes are preserved.
@@ -270,6 +307,6 @@ The project follows these practical principles:
 
 ## Project Status
 
-The current release is a maintainable hosts-file DNS sinkhole with SQLite-backed administration, uBlock import, blocklist search, JSON/CSV import and export, native save dialogs, and configuration activity logging.
+The current release is a maintainable hosts-file and local-DNS sinkhole with SQLite-backed administration, full uBlock rule retention, hostname blocklist search, JSON/CSV import and export, native save dialogs, and DNS/configuration activity logging.
 
 The major unfinished capability is real-time DNS observability. Implementing that capability requires introducing a local DNS proxy or a platform-specific DNS/packet monitoring backend; it cannot be achieved by adding more UI polling to the current hosts-file writer.

@@ -76,6 +76,17 @@ function formatTime(timestamp: string) {
     : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function userFacingError(message: unknown) {
+  const text = String(message).replace(/\s+/g, " ").trim();
+  if (
+    text.includes("Resolve-DnsName") ||
+    text.includes("CannotConvertArgumentNoMessage")
+  ) {
+    return "Windows could not resolve the blocklist domains for packet filtering. Check the device DNS connection and try again.";
+  }
+  return text.length > 320 ? `${text.slice(0, 317)}...` : text;
+}
+
 function App() {
   const [page, setPage] = useState<Page>("overview");
   const [data, setData] = useState(initialData);
@@ -91,12 +102,14 @@ function App() {
   const [error, setError] = useState("");
   const importInputRef = useRef<HTMLInputElement>(null);
 
-  async function loadDashboard() {
+  async function loadDashboard(clearError = true) {
     try {
       setData(await invoke<DashboardData>("get_dashboard"));
-      setError("");
+      if (clearError) {
+        setError("");
+      }
     } catch (message) {
-      setError(String(message));
+      setError(userFacingError(message));
     } finally {
       setIsLoading(false);
     }
@@ -104,7 +117,7 @@ function App() {
 
   useEffect(() => {
     void loadDashboard();
-    const timer = window.setInterval(() => void loadDashboard(), 2000);
+    const timer = window.setInterval(() => void loadDashboard(false), 2000);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -124,7 +137,7 @@ function App() {
         }),
       );
     } catch (message) {
-      setError(String(message));
+      setError(userFacingError(message));
     } finally {
       setIsUpdating(false);
     }
@@ -134,7 +147,7 @@ function App() {
     try {
       setData(await invoke<DashboardData>("clear_activity"));
     } catch (message) {
-      setError(String(message));
+      setError(userFacingError(message));
     }
   }
 
@@ -158,7 +171,7 @@ function App() {
       setNewNotes("");
       setError("");
     } catch (message) {
-      setError(String(message));
+      setError(userFacingError(message));
     }
   }
 
@@ -167,7 +180,7 @@ function App() {
       setData(await invoke<DashboardData>("remove_domain", { domain }));
       setError("");
     } catch (message) {
-      setError(String(message));
+      setError(userFacingError(message));
     }
   }
 
@@ -332,7 +345,7 @@ function App() {
       setData(await invoke<DashboardData>("import_domains", { domains }));
       setError("");
     } catch (message) {
-      setError(String(message));
+      setError(userFacingError(message));
     }
   }
 

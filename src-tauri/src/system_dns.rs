@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use std::collections::{HashMap, HashSet};
 use std::fs;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::net::IpAddr;
@@ -31,13 +33,13 @@ pub fn configure_local_dns(app: &AppHandle) -> Result<(), String> {
         states
     };
 
+    let mut configured_aliases = HashSet::new();
     for state in &states {
-        let servers = if state.family == 4 {
-            vec!["127.0.0.1".to_string()]
-        } else {
-            vec!["::1".to_string()]
-        };
-        if let Err(error) = set_servers(&state.alias, state.family, &servers) {
+        if !configured_aliases.insert(state.alias.clone()) {
+            continue;
+        }
+        let servers = ["127.0.0.1".to_string(), "::1".to_string()];
+        if let Err(error) = set_servers(&state.alias, &servers) {
             let _ = restore_dns(app);
             return Err(error);
         }
@@ -59,16 +61,22 @@ pub fn restore_dns(app: &AppHandle) -> Result<(), String> {
 
     let states = read_backup(&path)?;
     let mut first_error = None;
-    for state in &states {
-        let result = if state.servers.is_empty() {
+    let mut servers_by_alias = HashMap::<String, Vec<String>>::new();
+    for state in states {
+        servers_by_alias
+            .entry(state.alias)
+            .or_default()
+            .extend(state.servers);
+    }
+    for (alias, servers) in servers_by_alias {
+        let result = if servers.is_empty() {
             run_powershell(&format!(
-                "Reset-DnsClientServerAddress -InterfaceAlias {} -AddressFamily {}",
-                quote_ps(&state.alias),
-                family_name(state.family)
+                "Set-DnsClientServerAddress -InterfaceAlias {} -ResetServerAddresses",
+                quote_ps(&alias)
             ))
             .map(|_| ())
         } else {
-            set_servers(&state.alias, state.family, &state.servers)
+            set_servers(&alias, &servers)
         };
         if let Err(error) = result {
             first_error.get_or_insert(error);
@@ -142,15 +150,15 @@ $items | ConvertTo-Json -Compress
 }
 
 #[cfg(target_os = "windows")]
-fn set_servers(alias: &str, family: u16, servers: &[String]) -> Result<(), String> {
+fn set_servers(alias: &str, servers: &[String]) -> Result<(), String> {
     let addresses = servers
         .iter()
         .map(|server| quote_ps(server))
         .collect::<Vec<_>>()
         .join(", ");
     run_powershell(&format!(
-        "Set-DnsClientServerAddress -InterfaceAlias {} -AddressFamily {} -ServerAddresses @({addresses})",
-        quote_ps(alias), family_name(family)
+        "Set-DnsClientServerAddress -InterfaceAlias {} -ServerAddresses @({addresses})",
+        quote_ps(alias)
     ))
     .map(|_| ())
 }
@@ -182,15 +190,6 @@ fn write_backup(path: &PathBuf, states: &[AdapterDnsState]) -> Result<(), String
 #[cfg(target_os = "windows")]
 fn quote_ps(value: &str) -> String {
     format!("'{}'", value.replace("'", "''"))
-}
-
-#[cfg(target_os = "windows")]
-fn family_name(family: u16) -> &'static str {
-    if family == 6 {
-        "IPv6"
-    } else {
-        "IPv4"
-    }
 }
 
 #[cfg(target_os = "windows")]

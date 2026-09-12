@@ -211,8 +211,9 @@ fn resolve_domains(domains: &[String]) -> Result<Vec<String>, String> {
 fn resolve_domain(domain: &str) -> Result<Vec<String>, String> {
     #[cfg(target_os = "windows")]
     {
+        let domain = domain.replace('\'', "''");
         let output = run_powershell(&format!(
-            "Resolve-DnsName -Type A,AAAA -NoHostsFile -ErrorAction SilentlyContinue {domain} | Select-Object -ExpandProperty IPAddress"
+            "Resolve-DnsName -Type A_AAAA -Name '{domain}' -NoHostsFile -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress"
         ))?;
         Ok(extract_addresses(&output))
     }

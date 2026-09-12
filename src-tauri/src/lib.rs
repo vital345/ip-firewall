@@ -2,6 +2,7 @@ mod commands;
 mod database;
 mod dns_proxy;
 mod models;
+mod packet_filter;
 mod sinkhole;
 mod system_dns;
 
@@ -11,6 +12,9 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(std::sync::Mutex::new(dns_proxy::DnsProxyHandle::default()))
+        .manage(std::sync::Mutex::new(
+            packet_filter::PacketFilterHandle::new(),
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

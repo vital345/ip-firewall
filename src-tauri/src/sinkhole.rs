@@ -191,17 +191,24 @@ pub fn blocker_state(
     hosts: &str,
     blocked_requests: u64,
     domain_count: usize,
+    packet_filter_backend: String,
+    packet_filter_enabled: bool,
+    packet_filter_note: String,
 ) -> crate::models::BlockerState {
     let backend = sinkhole_backend();
     crate::models::BlockerState {
-        enabled: hosts.contains(BLOCK_START),
+        enabled: hosts.contains(BLOCK_START) || packet_filter_enabled,
         domain_count,
         observed_blocked_requests: blocked_requests,
         hosts_path: hosts_path().display().to_string(),
         operating_system: operating_system_name(),
         sinkhole_backend: backend.name(),
         host_writeable: backend.writable(),
-        protection_supported: !matches!(backend, SinkholeBackend::Unsupported),
+        protection_supported: !matches!(backend, SinkholeBackend::Unsupported)
+            || packet_filter_backend != "unsupported",
+        packet_filter_backend,
+        packet_filter_enabled,
+        packet_filter_note,
     }
 }
 

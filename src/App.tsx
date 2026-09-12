@@ -18,6 +18,9 @@ type BlockerState = {
   sinkhole_backend: string;
   host_writeable: boolean;
   protection_supported: boolean;
+  packet_filter_backend: string;
+  packet_filter_enabled: boolean;
+  packet_filter_note: string;
 };
 
 type ActivityEvent = {
@@ -57,6 +60,9 @@ const initialData: DashboardData = {
     sinkhole_backend: "Hosts file sinkhole",
     host_writeable: true,
     protection_supported: true,
+    packet_filter_backend: "unavailable",
+    packet_filter_enabled: false,
+    packet_filter_note: "Waiting for native enforcement status",
   },
   events: [],
   blocklist: [],
@@ -109,13 +115,6 @@ function App() {
       );
       return;
     }
-    if (!data.state.host_writeable) {
-      setError(
-        "This OS cannot modify the system hosts file from this app. Run with administrator privileges or use a supported hosts-editing environment.",
-      );
-      return;
-    }
-
     setIsUpdating(true);
     setError("");
     try {
@@ -444,10 +443,7 @@ function App() {
                 className={`power-button ${state.enabled ? "enabled" : ""}`}
                 onClick={toggleBlocker}
                 disabled={
-                  isLoading ||
-                  isUpdating ||
-                  !state.host_writeable ||
-                  !state.protection_supported
+                  isLoading || isUpdating || !state.protection_supported
                 }
               >
                 <span className="power-symbol">⏻</span>
@@ -456,11 +452,9 @@ function App() {
                     ? "UPDATING"
                     : !state.protection_supported
                       ? "UNSUPPORTED PLATFORM"
-                      : !state.host_writeable
-                        ? "ADMIN REQUIRED"
-                        : state.enabled
-                          ? "PROTECTED"
-                          : "PROTECT DEVICE"}
+                      : state.enabled
+                        ? "PROTECTED"
+                        : "PROTECT DEVICE"}
                 </span>
               </button>
             </section>
@@ -481,8 +475,12 @@ function App() {
               </article>
               <article className="metric-card">
                 <span className="metric-label">FILTER MODE</span>
-                <strong>DNS</strong>
-                <span className="metric-note">System resolver sinkhole</span>
+                <strong>
+                  {state.packet_filter_enabled ? "PACKET" : "DNS"}
+                </strong>
+                <span className="metric-note">
+                  {state.packet_filter_backend}
+                </span>
               </article>
             </section>
             <section className="lower-grid">
@@ -509,17 +507,15 @@ function App() {
                 <div className="panel-heading">
                   <div>
                     <p className="eyebrow">TELEMETRY STATUS</p>
-                    <h3>DNS sinkhole mode</h3>
+                    <h3>{state.packet_filter_backend}</h3>
                   </div>
                   <span className="mini-tag">HONEST</span>
                 </div>
                 <div className="telemetry-note">
                   <span className="empty-icon">i</span>
                   <p>
-                    Packet-level counters require a Windows Filtering Platform
-                    driver. This mode reports persisted application events
-                    without inventing packet data. Edge Secure DNS can bypass
-                    the hosts file; disable it in edge://settings/privacy.
+                    {state.packet_filter_note} DNS events remain available as an
+                    additional visibility layer when the local proxy is active.
                   </p>
                 </div>
               </article>

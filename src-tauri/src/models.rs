@@ -12,6 +12,7 @@ pub struct BlockerState {
     pub operating_system: String,
     pub sinkhole_backend: String,
     pub host_writeable: bool,
+    pub protection_supported: bool,
 }
 
 #[derive(Debug, Serialize)]

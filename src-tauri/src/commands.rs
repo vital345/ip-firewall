@@ -9,6 +9,7 @@ use crate::models::{DashboardData, BLOCK_START};
 use crate::sinkhole::{
     blocker_state, can_write_hosts_file, normalize_domain, read_hosts, write_blocker,
 };
+use crate::system_dns::{configure_local_dns, restore_dns};
 
 fn refresh_active_sinkhole(app: &AppHandle) -> Result<(), String> {
     if read_hosts()?.contains(BLOCK_START) {
@@ -62,25 +63,44 @@ pub fn set_blocker_enabled(
     let mut proxy = dns_proxy
         .lock()
         .map_err(|_| "Unable to access the DNS proxy state.".to_string())?;
+    let mut detail = if enabled {
+        "Advertisement filter enabled"
+    } else {
+        "Advertisement filter disabled"
+    };
     if enabled {
-        proxy.start(app.clone())?;
+        let dns_configured = match configure_local_dns(&app) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("System DNS unavailable, using hosts-file fallback: {error}");
+                let _ = restore_dns(&app);
+                false
+            }
+        };
+        if dns_configured {
+            if let Err(error) = proxy.start(app.clone()) {
+                let _ = restore_dns(&app);
+                detail = "Hosts-file protection enabled; local DNS proxy unavailable";
+                eprintln!("Local DNS proxy unavailable, using hosts-file fallback: {error}");
+            }
+        } else {
+            detail = "Hosts-file protection enabled; system DNS unavailable";
+        }
         if let Err(error) = write_blocker(&app, true) {
             proxy.stop();
+            let _ = restore_dns(&app);
             return Err(error);
         }
     } else {
         write_blocker(&app, false)?;
         proxy.stop();
+        restore_dns(&app)?;
     }
     record_event(
         &app,
         "system",
         if enabled { "enabled" } else { "disabled" },
-        if enabled {
-            "Advertisement filter enabled"
-        } else {
-            "Advertisement filter disabled"
-        },
+        detail,
         None,
     )?;
     get_dashboard(app)

@@ -201,6 +201,7 @@ pub fn blocker_state(
         operating_system: operating_system_name(),
         sinkhole_backend: backend.name(),
         host_writeable: backend.writable(),
+        protection_supported: !matches!(backend, SinkholeBackend::Unsupported),
     }
 }
 

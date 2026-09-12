@@ -18,6 +18,8 @@ const LISTEN_ADDR_V6: &str = "[::1]:53";
 const UPSTREAM_ADDRS: [&str; 2] = ["1.1.1.1:53", "8.8.8.8:53"];
 const READ_TIMEOUT: Duration = Duration::from_millis(250);
 const CACHE_TTL: Duration = Duration::from_secs(30);
+const TCP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_DNS_PACKET: usize = 65_535;
 
 struct ProxyState {
     domains: RwLock<HashSet<String>>,
@@ -48,16 +50,14 @@ impl DnsProxyHandle {
             return Ok(());
         }
 
-        let udp_v4 = UdpSocket::bind(LISTEN_ADDR_V4).map_err(|error| {
-            format!("Unable to start the DNS proxy on {LISTEN_ADDR_V4}: {error}")
-        })?;
-        let udp_v6 = UdpSocket::bind(LISTEN_ADDR_V6).map_err(|error| {
-            format!("Unable to start the DNS proxy on {LISTEN_ADDR_V6}: {error}")
-        })?;
+        let udp_v4 = UdpSocket::bind(LISTEN_ADDR_V4)
+            .map_err(|error| bind_error("UDP", LISTEN_ADDR_V4, error))?;
+        let udp_v6 = UdpSocket::bind(LISTEN_ADDR_V6)
+            .map_err(|error| bind_error("UDP", LISTEN_ADDR_V6, error))?;
         let tcp_v4 = TcpListener::bind(LISTEN_ADDR_V4)
-            .map_err(|error| format!("Unable to start TCP DNS on {LISTEN_ADDR_V4}: {error}"))?;
+            .map_err(|error| bind_error("TCP", LISTEN_ADDR_V4, error))?;
         let tcp_v6 = TcpListener::bind(LISTEN_ADDR_V6)
-            .map_err(|error| format!("Unable to start TCP DNS on {LISTEN_ADDR_V6}: {error}"))?;
+            .map_err(|error| bind_error("TCP", LISTEN_ADDR_V6, error))?;
         for socket in [&udp_v4, &udp_v6] {
             socket
                 .set_read_timeout(Some(READ_TIMEOUT))
@@ -98,8 +98,14 @@ impl DnsProxyHandle {
         threads.push(thread::spawn(move || {
             while !refresh_stop.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_secs(2));
+                let next_domains = load_blocklist(&refresh_app);
                 if let Ok(mut domains) = refresh_state.domains.write() {
-                    *domains = load_blocklist(&refresh_app);
+                    if *domains != next_domains {
+                        *domains = next_domains;
+                        if let Ok(mut cache) = refresh_state.cache.lock() {
+                            cache.clear();
+                        }
+                    }
                 }
             }
         }));
@@ -116,6 +122,15 @@ impl DnsProxyHandle {
             let _ = thread.join();
         }
     }
+}
+
+fn bind_error(protocol: &str, address: &str, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::AddrInUse {
+        return format!(
+            "Unable to start {protocol} DNS on {address}: port 53 is already in use. Disable Internet Connection Sharing or another DNS service, then retry. Hosts-file protection can still be used as a fallback."
+        );
+    }
+    format!("Unable to start {protocol} DNS on {address}: {error}")
 }
 
 impl Drop for DnsProxyHandle {
@@ -143,7 +158,7 @@ fn spawn_tcp(
 }
 
 fn run_udp(socket: UdpSocket, stop: Arc<AtomicBool>, state: Arc<ProxyState>, app: AppHandle) {
-    let mut packet = [0_u8; 4096];
+    let mut packet = [0_u8; MAX_DNS_PACKET];
     while !stop.load(Ordering::Relaxed) {
         let (size, client) = match socket.recv_from(&mut packet) {
             Ok(result) => result,
@@ -192,29 +207,38 @@ fn run_tcp(listener: TcpListener, stop: Arc<AtomicBool>, state: Arc<ProxyState>,
 }
 
 fn handle_tcp_client(mut stream: TcpStream, state: Arc<ProxyState>, app: AppHandle) {
-    let mut length = [0_u8; 2];
-    if stream.read_exact(&mut length).is_err() {
-        return;
-    };
-    let mut packet = vec![0_u8; usize::from(u16::from_be_bytes(length))];
-    if stream.read_exact(&mut packet).is_err() {
-        return;
-    }
-    let Ok(request) = Message::from_vec(&packet) else {
-        return;
-    };
-    let Some(query) = request.queries().first() else {
-        return;
-    };
-    let domain = query
-        .name()
-        .to_utf8()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    if let Ok(response) = resolve_query(&packet, &request, &domain, &state, &app) {
-        let length = (response.len() as u16).to_be_bytes();
-        let _ = stream.write_all(&length);
-        let _ = stream.write_all(&response);
+    let _ = stream.set_read_timeout(Some(TCP_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(TCP_TIMEOUT));
+    loop {
+        let mut length = [0_u8; 2];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let packet_length = usize::from(u16::from_be_bytes(length));
+        if packet_length == 0 || packet_length > MAX_DNS_PACKET {
+            return;
+        }
+        let mut packet = vec![0_u8; packet_length];
+        if stream.read_exact(&mut packet).is_err() {
+            return;
+        }
+        let Ok(request) = Message::from_vec(&packet) else {
+            return;
+        };
+        let Some(query) = request.queries().first() else {
+            return;
+        };
+        let domain = query
+            .name()
+            .to_utf8()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if let Ok(response) = resolve_query(&packet, &request, &domain, &state, &app) {
+            let length = (response.len() as u16).to_be_bytes();
+            if stream.write_all(&length).is_err() || stream.write_all(&response).is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -297,13 +321,20 @@ fn is_blocked(state: &ProxyState, domain: &str) -> bool {
     let Ok(domains) = state.domains.read() else {
         return false;
     };
-    domains
-        .iter()
-        .any(|blocked| domain_matches(domain, blocked))
+    domain_matches(domain, &domains)
 }
 
-fn domain_matches(query: &str, blocked: &str) -> bool {
-    query == blocked || query.ends_with(&format!(".{blocked}"))
+fn domain_matches(query: &str, blocked: &HashSet<String>) -> bool {
+    let mut candidate = query;
+    loop {
+        if blocked.contains(candidate) {
+            return true;
+        }
+        let Some(separator) = candidate.find('.') else {
+            return false;
+        };
+        candidate = &candidate[separator + 1..];
+    }
 }
 
 fn blocked_response(request: &Message) -> Result<Vec<u8>, String> {
@@ -320,6 +351,8 @@ fn blocked_response(request: &Message) -> Result<Vec<u8>, String> {
 }
 
 fn forward_query(packet: &[u8]) -> Result<Vec<u8>, String> {
+    let request = Message::from_vec(packet)
+        .map_err(|error| format!("Unable to decode DNS query for upstream validation: {error}"))?;
     let socket = UdpSocket::bind("0.0.0.0:0")
         .map_err(|error| format!("Unable to open upstream DNS socket: {error}"))?;
     socket
@@ -333,7 +366,23 @@ fn forward_query(packet: &[u8]) -> Result<Vec<u8>, String> {
         }
         let mut response = [0_u8; 4096];
         match socket.recv_from(&mut response) {
-            Ok((size, _source)) => return Ok(response[..size].to_vec()),
+            Ok((size, source)) => {
+                let candidate = &response[..size];
+                if validate_upstream_response(&request, candidate, source) {
+                    if let Ok(message) = Message::from_vec(candidate) {
+                        if message.truncated() {
+                            if let Ok(tcp_response) = forward_query_tcp(packet, upstream) {
+                                if validate_upstream_response(&request, &tcp_response, source) {
+                                    return Ok(tcp_response);
+                                }
+                            }
+                        } else {
+                            return Ok(candidate.to_vec());
+                        }
+                    }
+                }
+                last_error = "Upstream response did not match the query.".to_string();
+            }
             Err(error) => last_error = error.to_string(),
         }
     }
@@ -342,10 +391,69 @@ fn forward_query(packet: &[u8]) -> Result<Vec<u8>, String> {
     ))
 }
 
+fn forward_query_tcp(packet: &[u8], upstream: &str) -> Result<Vec<u8>, String> {
+    let address = upstream
+        .parse()
+        .map_err(|error| format!("Unable to parse upstream DNS address: {error}"))?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|error| format!("Unable to connect to upstream DNS over TCP: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| format!("Unable to configure upstream TCP read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| format!("Unable to configure upstream TCP write timeout: {error}"))?;
+    let length = (packet.len() as u16).to_be_bytes();
+    stream
+        .write_all(&length)
+        .and_then(|_| stream.write_all(packet))
+        .map_err(|error| format!("Unable to send upstream TCP DNS query: {error}"))?;
+    let mut response_length = [0_u8; 2];
+    stream
+        .read_exact(&mut response_length)
+        .map_err(|error| format!("Unable to read upstream TCP DNS length: {error}"))?;
+    let response_size = usize::from(u16::from_be_bytes(response_length));
+    if response_size == 0 || response_size > MAX_DNS_PACKET {
+        return Err("Upstream TCP DNS response size was invalid.".to_string());
+    }
+    let mut response = vec![0_u8; response_size];
+    stream
+        .read_exact(&mut response)
+        .map_err(|error| format!("Unable to read upstream TCP DNS response: {error}"))?;
+    Ok(response)
+}
+
+fn validate_upstream_response(
+    request: &Message,
+    packet: &[u8],
+    source: std::net::SocketAddr,
+) -> bool {
+    if !UPSTREAM_ADDRS
+        .iter()
+        .any(|address| address == &source.to_string())
+    {
+        return false;
+    }
+    let Ok(response) = Message::from_vec(packet) else {
+        return false;
+    };
+    let Some(request_query) = request.queries().first() else {
+        return false;
+    };
+    let Some(response_query) = response.queries().first() else {
+        return false;
+    };
+    response.id() == request.id()
+        && response_query.name() == request_query.name()
+        && response_query.query_type() == request_query.query_type()
+        && response_query.query_class() == request_query.query_class()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{blocked_response, domain_matches};
     use hickory_proto::op::{Message, ResponseCode};
+    use std::collections::HashSet;
     #[test]
     fn blocked_response_preserves_query_id_and_returns_nxdomain() {
         let request = Message::from_vec(&[
@@ -361,8 +469,9 @@ mod tests {
 
     #[test]
     fn blocked_domains_match_subdomains_without_matching_lookalikes() {
-        assert!(domain_matches("ads.example.com", "example.com"));
-        assert!(domain_matches("example.com", "example.com"));
-        assert!(!domain_matches("notexample.com", "example.com"));
+        let blocked = HashSet::from(["example.com".to_string()]);
+        assert!(domain_matches("ads.example.com", &blocked));
+        assert!(domain_matches("example.com", &blocked));
+        assert!(!domain_matches("notexample.com", &blocked));
     }
 }

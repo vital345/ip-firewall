@@ -17,6 +17,7 @@ type BlockerState = {
   operating_system: string;
   sinkhole_backend: string;
   host_writeable: boolean;
+  protection_supported: boolean;
 };
 
 type ActivityEvent = {
@@ -55,6 +56,7 @@ const initialData: DashboardData = {
     operating_system: "Cross-platform",
     sinkhole_backend: "Hosts file sinkhole",
     host_writeable: true,
+    protection_supported: true,
   },
   events: [],
   blocklist: [],
@@ -101,6 +103,12 @@ function App() {
   }, []);
 
   async function toggleBlocker() {
+    if (!data.state.protection_supported) {
+      setError(
+        "This operating system requires a platform-specific DNS or VPN backend that IP Firewall does not provide yet.",
+      );
+      return;
+    }
     if (!data.state.host_writeable) {
       setError(
         "This OS cannot modify the system hosts file from this app. Run with administrator privileges or use a supported hosts-editing environment.",
@@ -435,17 +443,24 @@ function App() {
               <button
                 className={`power-button ${state.enabled ? "enabled" : ""}`}
                 onClick={toggleBlocker}
-                disabled={isLoading || isUpdating || !state.host_writeable}
+                disabled={
+                  isLoading ||
+                  isUpdating ||
+                  !state.host_writeable ||
+                  !state.protection_supported
+                }
               >
                 <span className="power-symbol">⏻</span>
                 <span>
                   {isUpdating
                     ? "UPDATING"
-                    : !state.host_writeable
-                      ? "ADMIN REQUIRED"
-                      : state.enabled
-                        ? "PROTECTED"
-                        : "PROTECT DEVICE"}
+                    : !state.protection_supported
+                      ? "UNSUPPORTED PLATFORM"
+                      : !state.host_writeable
+                        ? "ADMIN REQUIRED"
+                        : state.enabled
+                          ? "PROTECTED"
+                          : "PROTECT DEVICE"}
                 </span>
               </button>
             </section>

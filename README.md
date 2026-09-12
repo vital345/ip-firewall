@@ -20,7 +20,7 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-This is DNS-level device filtering, not arbitrary packet inspection. When protection is enabled, IP Firewall starts local DNS listeners on `127.0.0.1:53` and `[::1]:53`: blocked domains and their subdomains receive an `NXDOMAIN` response, while allowed queries are forwarded to `1.1.1.1` with `8.8.8.8` fallback. The proxy supports UDP and TCP DNS, keeps a bounded in-memory blocklist snapshot, and caches allowed responses briefly. Configure the active Windows network adapter to use `127.0.0.1` as its DNS server for other applications to use the proxy. Edge Secure DNS must be disabled or configured to use the operating-system resolver; otherwise it can bypass both the proxy and hosts file. Full packet-level dropping on Windows requires a Windows Filtering Platform driver.
+This is DNS-level device filtering, not arbitrary packet inspection. When protection is enabled, IP Firewall starts local DNS listeners on `127.0.0.1:53` and `[::1]:53`: blocked domains and their subdomains receive an `NXDOMAIN` response, while allowed queries are forwarded to `1.1.1.1` with `8.8.8.8` fallback. The proxy supports UDP and TCP DNS, keeps a bounded in-memory blocklist snapshot, and caches allowed responses briefly. On Windows, enabling protection automatically snapshots active adapter DNS settings and points those adapters to localhost; disabling protection restores the exact prior settings. Run the app as Administrator for this network configuration. Edge Secure DNS must be disabled or configured to use the operating-system resolver; otherwise it can bypass both the proxy and hosts file. Full packet-level dropping on Windows requires a Windows Filtering Platform driver.
 
 On Windows, list the active adapters with:
 
@@ -28,17 +28,26 @@ On Windows, list the active adapters with:
 Get-NetAdapter | Where-Object Status -eq "Up" | Select-Object Name, InterfaceAlias
 ```
 
-After starting IP Firewall, point the active adapter at the local proxy:
+IP Firewall performs this configuration automatically when protection is enabled. The manual equivalent is:
 
 ```powershell
 Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ServerAddresses 127.0.0.1
 ```
 
-Replace `Wi-Fi` with the adapter alias shown on your machine. Restore automatic DNS when the proxy is stopped with:
+Replace `Wi-Fi` with the adapter alias shown on your machine. IP Firewall restores the previous settings when protection is disabled or the application exits. The manual reset command is:
 
 ```powershell
 Set-DnsClientServerAddress -InterfaceAlias "Wi-Fi" -ResetServerAddresses
 ```
+
+## Platform support
+
+- **Windows**: adapter DNS is configured through PowerShell and restored from a local backup. Run as Administrator.
+- **Linux**: active `resolvectl` links are configured to localhost and restored on disable or exit. Run with the privileges required by your resolver manager.
+- **macOS**: active `networksetup` services are configured to localhost and restored on disable or exit. Run with administrator privileges when prompted.
+- **Android**: system-wide filtering is not enabled yet. Android requires a native `VpnService` backend rather than hosts-file or privileged port-53 access; the UI reports this platform as unsupported.
+
+DoH/DoT selected directly by a browser, DNS supplied by a VPN, direct IP connections, and advertisements sharing a hostname with legitimate content remain outside DNS-layer control on every platform.
 
 ## Data and activity
 
@@ -126,16 +135,18 @@ The backend also performs a best-effort DNS cache flush after hosts-file changes
 - Export the blocklist as JSON or CSV.
 - Export the activity log as JSON or CSV.
 - Enable and disable the managed hosts-file sinkhole.
+- Run a local dual-stack DNS proxy with UDP and TCP support, suffix matching, caching, and upstream fallback.
+- Automatically configure and restore Windows adapter DNS settings while protection is enabled.
 - Record administrative changes such as enabling protection, adding domains, importing domains, and removing domains.
 - Preserve user-owned hosts-file lines outside the managed section.
 
 ### It cannot yet
 
-- Observe every DNS query made by Edge or another application.
-- Distinguish every real blocked request from every allowed request.
-- Provide genuine per-request real-time DNS activity.
+- Inspect DNS-over-HTTPS or DNS-over-TLS traffic selected directly by applications.
+- Override DNS servers supplied by VPNs or other private network tunnels.
 - Inspect arbitrary packets or connections.
-- Reliably override encrypted DNS used directly by a browser or VPN.
+- Block direct IP connections that do not perform DNS resolution.
+- Distinguish advertisements from content when both use the same hostname.
 - Provide kernel-level packet filtering without a platform-specific privileged component.
 
 The UI must not fabricate blocked-request data. A configured domain is not the same thing as a domain that was actually requested. The current Activity page therefore records configuration events and deliberately does not claim to be a live DNS packet monitor.
@@ -161,6 +172,8 @@ The backend is split by responsibility:
 - `src-tauri/src/database.rs` owns SQLite paths, schema creation, seed loading, event persistence, and queries.
 - `src-tauri/src/models.rs` contains serializable state and event models shared with the frontend.
 - `src-tauri/src/sinkhole.rs` owns hosts-file paths, platform selection, normalization, managed-block generation, writing, and DNS-cache flushing.
+- `src-tauri/src/dns_proxy.rs` owns local UDP/TCP DNS listeners, blocklist matching, caching, upstream forwarding, and DNS activity events.
+- `src-tauri/src/system_dns.rs` owns Windows adapter DNS snapshots, localhost configuration, restoration, and startup recovery.
 - `src-tauri/seed_blocklist.sql` provides first-run seed data independently from Rust source code.
 
 This separation keeps UI commands thin and prevents database or operating-system details from spreading through the application.
@@ -220,7 +233,7 @@ Invalid values are ignored by the backend normalization step. Existing domains a
 
 ### Import the uBlock list from the command line
 
-The dependency-free Python importer downloads the upstream uBlock list, extracts only hostname rules, ignores cosmetic and script-only filters, and inserts new domains into SQLite:
+The dependency-free Python importer downloads the upstream uBlock list, stores all non-comment rules in `filter_rules`, and extracts simple hostname rules into `blocked_domains` for DNS filtering:
 
 ```bash
 python scripts/import_ublock_blocklist.py --dry-run
@@ -233,27 +246,16 @@ The importer supports `--database` when the SQLite file is not at the default Ta
 
 Blocklist and Activity exports open a native save dialog. The user chooses the destination and filename. The backend writes the selected file path rather than silently placing exports in a browser Downloads directory.
 
-## Activity And Real-Time Telemetry Roadmap
+## Activity And Real-Time Telemetry
 
-The current Activity log is a configuration log. It is useful for answering questions such as:
+The Activity log contains both configuration events and DNS proxy decisions. It is useful for answering questions such as:
 
 - When was protection enabled?
 - Which domains were added or removed?
 - When was a public blocklist imported?
 - When was the activity log cleared?
 
-It is not a request log. To support the requested real-time view of blocked and unfiltered domains, the next backend should be a local DNS proxy:
-
-1. Start a local DNS listener on an available loopback address and port.
-2. Configure the operating system resolver to use that listener.
-3. Receive DNS queries from Edge and other applications.
-4. Normalize the queried hostname.
-5. Read the current SQLite blocklist or an in-memory snapshot refreshed from SQLite.
-6. If the hostname matches a blocked domain or suffix rule, return a sinkhole response and record a `blocked` event.
-7. Otherwise forward the request to a configured upstream resolver and record an `allowed` event.
-8. Stream events to the frontend through Tauri events or a command-backed event queue.
-9. Keep bounded retention and deduplication so a busy browser does not grow SQLite without limit.
-10. Restore the previous DNS configuration when protection is disabled or the application exits.
+The proxy records real DNS decisions when the operating system and application use its configured loopback resolver. It does not see browser DoH, VPN-private DNS, direct IP connections, or HTTP requests after DNS resolution.
 
 That architecture would make the following activity record truthful:
 
@@ -263,7 +265,7 @@ time       kind     domain                 action
 12:04:02   allowed  cdn.example.com        forwarded upstream
 ```
 
-The proxy must be implemented carefully for DNS transport details, IPv4/IPv6 resolver configuration, permissions, shutdown recovery, DNS-over-TLS/DNS-over-HTTPS behavior, and platform-specific resolver settings. A Windows Filtering Platform driver remains the correct route for arbitrary packet-level filtering, but it is a larger and more privileged project than a local DNS proxy.
+The proxy still does not implement upstream DNS-over-TLS/DNS-over-HTTPS. A Windows Filtering Platform driver remains the correct route for arbitrary packet-level filtering, but it is a larger and more privileged project than a local DNS proxy.
 
 ## Running The Project
 
@@ -309,4 +311,4 @@ The project follows these practical principles:
 
 The current release is a maintainable hosts-file and local-DNS sinkhole with SQLite-backed administration, full uBlock rule retention, hostname blocklist search, JSON/CSV import and export, native save dialogs, and DNS/configuration activity logging.
 
-The major unfinished capability is real-time DNS observability. Implementing that capability requires introducing a local DNS proxy or a platform-specific DNS/packet monitoring backend; it cannot be achieved by adding more UI polling to the current hosts-file writer.
+The major unfinished capabilities are browser-level request filtering, encrypted-DNS enforcement, VPN/direct-IP enforcement, and same-host advertisement separation. Those require an Edge extension, policy management, or a Windows Filtering Platform component; adding more DNS domains cannot provide them.

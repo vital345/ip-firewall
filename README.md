@@ -20,7 +20,7 @@ npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-This is DNS-level device filtering, not arbitrary packet inspection. When protection is enabled, IP Firewall also starts a local DNS proxy on `127.0.0.1:53`: blocked domains and their subdomains receive an `NXDOMAIN` response, while allowed queries are forwarded to `1.1.1.1`. Configure the active Windows network adapter to use `127.0.0.1` as its DNS server for other applications to use the proxy. Edge Secure DNS must be disabled or configured to use the operating-system resolver; otherwise it can bypass both the proxy and hosts file. Full packet-level dropping on Windows requires a Windows Filtering Platform driver.
+This is DNS-level device filtering, not arbitrary packet inspection. When protection is enabled, IP Firewall starts local DNS listeners on `127.0.0.1:53` and `[::1]:53`: blocked domains and their subdomains receive an `NXDOMAIN` response, while allowed queries are forwarded to `1.1.1.1` with `8.8.8.8` fallback. The proxy supports UDP and TCP DNS, keeps a bounded in-memory blocklist snapshot, and caches allowed responses briefly. Configure the active Windows network adapter to use `127.0.0.1` as its DNS server for other applications to use the proxy. Edge Secure DNS must be disabled or configured to use the operating-system resolver; otherwise it can bypass both the proxy and hosts file. Full packet-level dropping on Windows requires a Windows Filtering Platform driver.
 
 On Windows, list the active adapters with:
 

@@ -21,9 +21,15 @@ const CACHE_TTL: Duration = Duration::from_secs(30);
 const TCP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DNS_PACKET: usize = 65_535;
 
+struct CacheEntry {
+    created: Instant,
+    ttl: Duration,
+    response: Vec<u8>,
+}
+
 struct ProxyState {
     domains: RwLock<HashSet<String>>,
-    cache: Mutex<HashMap<Vec<u8>, (Instant, Vec<u8>)>>,
+    cache: Mutex<HashMap<Vec<u8>, CacheEntry>>,
 }
 
 pub struct DnsProxyHandle {
@@ -261,11 +267,11 @@ fn resolve_query(
         return Ok(response);
     }
 
-    let key = packet.get(2..).unwrap_or(packet).to_vec();
+    let key = cache_key_for_request(request);
     if let Ok(mut cache) = state.cache.lock() {
-        if let Some((created, cached)) = cache.get(&key) {
-            if created.elapsed() < CACHE_TTL {
-                let mut response = cached.clone();
+        if let Some(entry) = cache.get(&key) {
+            if entry.created.elapsed() < entry.ttl {
+                let mut response = entry.response.clone();
                 response[..2].copy_from_slice(&packet[..2]);
                 let _ = record_event(
                     app,
@@ -283,11 +289,22 @@ fn resolve_query(
     let mut response = forward_query(packet)?;
     if response.len() >= 2 {
         response[..2].copy_from_slice(&packet[..2]);
+        let response_ttl = Message::from_vec(&response)
+            .ok()
+            .map(response_cache_ttl_from_message)
+            .unwrap_or(CACHE_TTL);
         if let Ok(mut cache) = state.cache.lock() {
             if cache.len() >= 4096 {
-                cache.retain(|_, (created, _)| created.elapsed() < CACHE_TTL);
+                cache.retain(|_, entry| entry.created.elapsed() < entry.ttl);
             }
-            cache.insert(key, (Instant::now(), response.clone()));
+            cache.insert(
+                key,
+                CacheEntry {
+                    created: Instant::now(),
+                    ttl: response_ttl,
+                    response: response.clone(),
+                },
+            );
         }
     }
     let _ = record_event(
@@ -298,6 +315,46 @@ fn resolve_query(
         Some(domain),
     );
     Ok(response)
+}
+
+fn cache_key_for_request(request: &Message) -> Vec<u8> {
+    let Some(query) = request.queries().first() else {
+        return Vec::new();
+    };
+
+    let mut key = Vec::new();
+    let name = query.name().to_utf8();
+    let name = name.trim_end_matches('.');
+    if !name.is_empty() {
+        for label in name.split('.') {
+            let label_bytes = label.as_bytes();
+            key.push(label_bytes.len() as u8);
+            key.extend_from_slice(label_bytes);
+        }
+    }
+    key.push(0);
+    key.extend_from_slice(&(u16::from(query.query_type())).to_be_bytes());
+    key.extend_from_slice(&(u16::from(query.query_class())).to_be_bytes());
+    key
+}
+
+fn response_cache_ttl_from_message(message: Message) -> Duration {
+    response_cache_ttl(message.answers().iter().map(|record| record.ttl()))
+}
+
+fn response_cache_ttl<I>(ttls: I) -> Duration
+where
+    I: IntoIterator<Item = u32>,
+{
+    let mut min_ttl: Option<u64> = None;
+    for ttl in ttls {
+        let ttl = ttl as u64;
+        min_ttl = Some(match min_ttl {
+            Some(current) => current.min(ttl),
+            None => ttl,
+        });
+    }
+    Duration::from_secs(min_ttl.unwrap_or(5))
 }
 
 fn load_blocklist(app: &AppHandle) -> HashSet<String> {
@@ -451,7 +508,7 @@ fn validate_upstream_response(
 
 #[cfg(test)]
 mod tests {
-    use super::{blocked_response, domain_matches};
+    use super::{blocked_response, cache_key_for_request, domain_matches, response_cache_ttl};
     use hickory_proto::op::{Message, ResponseCode};
     use std::collections::HashSet;
     #[test]
@@ -473,5 +530,32 @@ mod tests {
         assert!(domain_matches("ads.example.com", &blocked));
         assert!(domain_matches("example.com", &blocked));
         assert!(!domain_matches("notexample.com", &blocked));
+    }
+
+    #[test]
+    fn cache_key_ignores_transaction_id_and_answer_variants() {
+        let request_a = Message::from_vec(&[
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'w',
+            b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+            0x00, 0x00, 0x01, 0x00, 0x01,
+        ])
+        .unwrap();
+        let request_b = Message::from_vec(&[
+            0x99, 0x88, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, b'w',
+            b'w', b'w', 0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
+            0x00, 0x00, 0x01, 0x00, 0x01,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cache_key_for_request(&request_a),
+            cache_key_for_request(&request_b)
+        );
+    }
+
+    #[test]
+    fn response_ttl_uses_the_shortest_record_lifetime() {
+        let ttl = response_cache_ttl([300, 60, 120]);
+        assert_eq!(ttl, std::time::Duration::from_secs(60));
     }
 }

@@ -28,10 +28,19 @@ type ActivityEvent = {
   detail: string;
 };
 
+type BlocklistEntry = {
+  domain: string;
+  category: string;
+  source: string;
+  enabled: boolean;
+  redirect: string;
+  notes: string;
+};
+
 type DashboardData = {
   state: BlockerState;
   events: ActivityEvent[];
-  blocklist: string[];
+  blocklist: BlocklistEntry[];
   database_path: string;
 };
 
@@ -63,6 +72,9 @@ function App() {
   const [page, setPage] = useState<Page>("overview");
   const [data, setData] = useState(initialData);
   const [newDomain, setNewDomain] = useState("");
+  const [newCategory, setNewCategory] = useState("advertising");
+  const [newSource, setNewSource] = useState("manual");
+  const [newNotes, setNewNotes] = useState("");
   const [blocklistQuery, setBlocklistQuery] = useState("");
   const [pageSize, setPageSize] = useState(10);
   const [currentPage, setCurrentPage] = useState(1);
@@ -127,8 +139,16 @@ function App() {
     }
 
     try {
-      setData(await invoke<DashboardData>("add_domain", { domain: trimmed }));
+      setData(
+        await invoke<DashboardData>("add_domain", {
+          domain: trimmed,
+          category: newCategory,
+          source: newSource.trim() || "manual",
+          notes: newNotes.trim(),
+        }),
+      );
       setNewDomain("");
+      setNewNotes("");
       setError("");
     } catch (message) {
       setError(String(message));
@@ -158,8 +178,11 @@ function App() {
   }
 
   async function exportBlocklistCsv() {
-    const csv = ["domain", ...data.blocklist]
-      .map((domain) => `"${domain.split('"').join('""')}"`)
+    const csv = ["domain,category,source,enabled,redirect,notes", ...data.blocklist.map((entry) =>
+      [entry.domain, entry.category, entry.source, entry.enabled, entry.redirect, entry.notes]
+        .map((value) => `"${String(value).split('"').join('""')}"`)
+        .join(","),
+    )]
       .join("\r\n");
     const path = await save({
       defaultPath: "ip-firewall-blocklist.csv",
@@ -230,9 +253,20 @@ function App() {
     try {
       const parsed: unknown = JSON.parse(contents);
       if (Array.isArray(parsed)) {
-        return parsed.filter(
-          (value): value is string => typeof value === "string",
-        );
+        return parsed.flatMap((value) => {
+          if (typeof value === "string") {
+            return [value];
+          }
+          if (
+            value !== null &&
+            typeof value === "object" &&
+            "domain" in value &&
+            typeof value.domain === "string"
+          ) {
+            return [value.domain];
+          }
+          return [];
+        });
       }
       if (
         parsed !== null &&
@@ -287,8 +321,11 @@ function App() {
   }
 
   const { state, events } = data;
-  const filteredDomains = data.blocklist.filter((domain) =>
-    domain.includes(blocklistQuery.trim().toLowerCase()),
+  const filteredDomains = data.blocklist.filter((entry) =>
+    [entry.domain, entry.category, entry.source, entry.notes]
+      .join(" ")
+      .toLowerCase()
+      .includes(blocklistQuery.trim().toLowerCase()),
   );
   const totalPages = Math.max(1, Math.ceil(filteredDomains.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
@@ -455,7 +492,8 @@ function App() {
                   <p>
                     Packet-level counters require a Windows Filtering Platform
                     driver. This mode reports persisted application events
-                    without inventing packet data.
+                    without inventing packet data. Edge Secure DNS can bypass
+                    the hosts file; disable it in edge://settings/privacy.
                   </p>
                 </div>
               </article>
@@ -535,7 +573,7 @@ function App() {
             <div className="page-heading">
               <div>
                 <p className="eyebrow">MANAGED ENDPOINTS</p>
-                <h2>{filteredDomains.length} advertising domains</h2>
+                <h2>{filteredDomains.length} managed endpoints</h2>
               </div>
               <div className="blocklist-actions">
                 <button className="outline-button" onClick={exportBlocklist}>
@@ -572,6 +610,28 @@ function App() {
                     value={newDomain}
                     onChange={(event) => setNewDomain(event.target.value)}
                     placeholder="Add a domain like example.com"
+                  />
+                  <select
+                    aria-label="Domain category"
+                    value={newCategory}
+                    onChange={(event) => setNewCategory(event.target.value)}
+                  >
+                    <option value="advertising">Advertising</option>
+                    <option value="tracking">Tracking</option>
+                    <option value="analytics">Analytics</option>
+                    <option value="infrastructure">Service infrastructure</option>
+                  </select>
+                  <input
+                    aria-label="Domain source"
+                    value={newSource}
+                    onChange={(event) => setNewSource(event.target.value)}
+                    placeholder="Source"
+                  />
+                  <input
+                    aria-label="Domain notes"
+                    value={newNotes}
+                    onChange={(event) => setNewNotes(event.target.value)}
+                    placeholder="Notes (optional)"
                   />
                   <button type="submit" className="primary-button">
                     ADD DOMAIN
@@ -614,23 +674,27 @@ function App() {
                   <tr>
                     <th>Status</th>
                     <th>Domain</th>
+                    <th>Category</th>
+                    <th>Source</th>
                     <th>Redirect</th>
                     <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleDomains.map((domain) => (
-                    <tr key={domain}>
+                  {visibleDomains.map((entry) => (
+                    <tr key={entry.domain}>
                       <td>
                         <span className="domain-status" />
                       </td>
-                      <td className="domain-name">{domain}</td>
-                      <td>0.0.0.0</td>
+                      <td className="domain-name">{entry.domain}</td>
+                      <td>{entry.category}</td>
+                      <td>{entry.source}</td>
+                      <td>{entry.redirect}</td>
                       <td>
                         <button
                           type="button"
                           className="remove-domain"
-                          onClick={() => removeDomain(domain)}
+                          onClick={() => removeDomain(entry.domain)}
                         >
                           REMOVE
                         </button>

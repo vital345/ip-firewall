@@ -69,13 +69,21 @@ pub fn set_blocker_enabled(app: AppHandle, enabled: bool) -> Result<DashboardDat
 }
 
 #[tauri::command]
-pub fn add_domain(app: AppHandle, domain: String) -> Result<DashboardData, String> {
+pub fn add_domain(
+    app: AppHandle,
+    domain: String,
+    category: String,
+    source: String,
+    notes: String,
+) -> Result<DashboardData, String> {
     let normalized = normalize_domain(domain)?;
     let (connection, _) = open_database(&app)?;
     let rows = connection
         .execute(
-            "INSERT OR IGNORE INTO blocked_domains (domain, added_at, is_default) VALUES (?1, ?2, 0)",
-            rusqlite::params![normalized, now_string()],
+            "INSERT OR IGNORE INTO blocked_domains
+             (domain, added_at, is_default, category, source, enabled, redirect, notes)
+             VALUES (?1, ?2, 0, ?3, ?4, 1, '0.0.0.0', ?5)",
+            rusqlite::params![normalized, now_string(), category, source, notes],
         )
         .map_err(|error| format!("Unable to add the domain to the blocklist: {error}"))?;
 
@@ -110,7 +118,9 @@ pub fn import_domains(app: AppHandle, domains: Vec<String>) -> Result<DashboardD
     for domain in &normalized_domains {
         transaction
             .execute(
-                "INSERT OR IGNORE INTO blocked_domains (domain, added_at, is_default) VALUES (?1, ?2, 0)",
+                "INSERT OR IGNORE INTO blocked_domains
+                 (domain, added_at, is_default, category, source, enabled, redirect, notes)
+                 VALUES (?1, ?2, 0, 'advertising', 'import', 1, '0.0.0.0', '')",
                 rusqlite::params![domain, now_string()],
             )
             .map_err(|error| format!("Unable to import the blocklist: {error}"))?;

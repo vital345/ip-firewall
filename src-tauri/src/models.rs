@@ -25,9 +25,19 @@ pub struct ActivityEvent {
 }
 
 #[derive(Debug, Serialize)]
+pub struct BlocklistEntry {
+    pub domain: String,
+    pub category: String,
+    pub source: String,
+    pub enabled: bool,
+    pub redirect: String,
+    pub notes: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DashboardData {
     pub state: BlockerState,
     pub events: Vec<ActivityEvent>,
-    pub blocklist: Vec<String>,
+    pub blocklist: Vec<BlocklistEntry>,
     pub database_path: String,
 }

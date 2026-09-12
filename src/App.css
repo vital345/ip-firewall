@@ -164,12 +164,14 @@ nav {
 }
 
 .admin-input-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(180px, 2fr) auto minmax(100px, 1fr) minmax(140px, 1.5fr) auto;
   gap: 12px;
 }
 
-.admin-input-row input {
-  flex: 1;
+.admin-input-row input,
+.admin-input-row select {
+  min-width: 0;
   min-width: 0;
   padding: 12px 14px;
   border: 1px solid #33413d;
@@ -179,6 +181,10 @@ nav {
 }
 
 .admin-input-row input:focus {
+  border-color: #c6f36b;
+}
+
+.admin-input-row select:focus {
   border-color: #c6f36b;
 }
 
@@ -901,5 +907,8 @@ nav {
   }
   .hero-panel:after {
     right: -100px;
+  }
+  .admin-input-row {
+    grid-template-columns: 1fr;
   }
 }

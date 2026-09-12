@@ -2,7 +2,6 @@
 """Import hostname rules from a uBlock filter list into the app SQLite database."""
 
 from __future__ import annotations
-
 import argparse
 import os
 import re
@@ -54,9 +53,26 @@ def ensure_schema(connection: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT NOT NULL UNIQUE,
             added_at TEXT NOT NULL,
-            is_default INTEGER NOT NULL DEFAULT 0
+            is_default INTEGER NOT NULL DEFAULT 0,
+            category TEXT NOT NULL DEFAULT 'advertising',
+            source TEXT NOT NULL DEFAULT 'manual',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            redirect TEXT NOT NULL DEFAULT '0.0.0.0',
+            notes TEXT NOT NULL DEFAULT ''
         )
         """)
+    for name, definition in (
+        ("category", "TEXT NOT NULL DEFAULT 'advertising'"),
+        ("source", "TEXT NOT NULL DEFAULT 'legacy'"),
+        ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+        ("redirect", "TEXT NOT NULL DEFAULT '0.0.0.0'"),
+        ("notes", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        try:
+            connection.execute(f"ALTER TABLE blocked_domains ADD COLUMN {name} {definition}")
+        except sqlite3.OperationalError as error:
+            if "duplicate column name" not in str(error).lower():
+                raise
 
 
 def import_domains(
@@ -80,8 +96,9 @@ def import_domains(
             timestamp = str(int(time.time()))
             connection.executemany(
                 """
-                INSERT OR IGNORE INTO blocked_domains (domain, added_at, is_default)
-                VALUES (?, ?, 0)
+                INSERT OR IGNORE INTO blocked_domains
+                (domain, added_at, is_default, category, source, enabled, redirect, notes)
+                VALUES (?, ?, 0, 'advertising', 'uBlock import', 1, '0.0.0.0', '')
                 """,
                 [(domain, timestamp) for domain in new_domains],
             )

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tauri::AppHandle;
 
 use crate::database::{ensure_blocklist, open_database};
-use crate::models::{BLOCK_END, BLOCK_START};
+use crate::models::{BlocklistEntry, BLOCK_END, BLOCK_START};
 
 pub enum SinkholeBackend {
     HostsFile { path: PathBuf, writable: bool },
@@ -124,10 +124,13 @@ pub fn normalize_domain(value: String) -> Result<String, String> {
     Ok(normalized.to_string())
 }
 
-pub fn managed_block_for(domains: &[String]) -> String {
+pub fn managed_block_for(domains: &[BlocklistEntry]) -> String {
     let mut block = format!("{BLOCK_START}\n");
-    for domain in domains {
-        block.push_str(&format!("0.0.0.0 {domain}\n0.0.0.0 www.{domain}\n"));
+    for entry in domains.iter().filter(|entry| entry.enabled) {
+        block.push_str(&format!(
+            "{} {}\n{} www.{}\n",
+            entry.redirect, entry.domain, entry.redirect, entry.domain
+        ));
     }
     block.push_str(BLOCK_END);
     block
@@ -209,11 +212,18 @@ pub fn managed_block(app: &AppHandle) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{managed_block_for, without_managed_block, BLOCK_END, BLOCK_START};
+    use super::{managed_block_for, without_managed_block, BlocklistEntry, BLOCK_END, BLOCK_START};
 
     #[test]
     fn managed_block_has_stable_markers() {
-        let block = managed_block_for(&["doubleclick.net".to_owned()]);
+        let block = managed_block_for(&[BlocklistEntry {
+            domain: "doubleclick.net".to_owned(),
+            category: "advertising".to_owned(),
+            source: "test".to_owned(),
+            enabled: true,
+            redirect: "0.0.0.0".to_owned(),
+            notes: String::new(),
+        }]);
         assert!(block.starts_with(BLOCK_START));
         assert!(block.ends_with(BLOCK_END));
         assert!(block.contains("0.0.0.0 doubleclick.net"));
@@ -221,7 +231,14 @@ mod tests {
 
     #[test]
     fn removing_managed_block_preserves_user_hosts() {
-        let block = managed_block_for(&["doubleclick.net".to_owned()]);
+        let block = managed_block_for(&[BlocklistEntry {
+            domain: "doubleclick.net".to_owned(),
+            category: "advertising".to_owned(),
+            source: "test".to_owned(),
+            enabled: true,
+            redirect: "0.0.0.0".to_owned(),
+            notes: String::new(),
+        }]);
         let hosts = format!("127.0.0.1 localhost\n\n{block}\n");
         assert_eq!(without_managed_block(&hosts), "127.0.0.1 localhost");
     }

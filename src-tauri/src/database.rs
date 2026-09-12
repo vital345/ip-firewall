@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
+use crate::models::BlocklistEntry;
+
 const SEED_BLOCKLIST_SQL: &str = include_str!("../seed_blocklist.sql");
 
 pub fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -26,7 +28,12 @@ pub fn open_database(app: &AppHandle) -> Result<(Connection, PathBuf), String> {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 domain TEXT NOT NULL UNIQUE,
                 added_at TEXT NOT NULL,
-                is_default INTEGER NOT NULL DEFAULT 0
+                is_default INTEGER NOT NULL DEFAULT 0,
+                category TEXT NOT NULL DEFAULT 'advertising',
+                source TEXT NOT NULL DEFAULT 'manual',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                redirect TEXT NOT NULL DEFAULT '0.0.0.0',
+                notes TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS activity_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +47,16 @@ pub fn open_database(app: &AppHandle) -> Result<(Connection, PathBuf), String> {
                 ON activity_events(created_at DESC);",
         )
         .map_err(|error| format!("Unable to initialize the activity database: {error}"))?;
+    for (name, definition) in [
+        ("category", "TEXT NOT NULL DEFAULT 'advertising'"),
+        ("source", "TEXT NOT NULL DEFAULT 'legacy'"),
+        ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+        ("redirect", "TEXT NOT NULL DEFAULT '0.0.0.0'"),
+        ("notes", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        let statement = format!("ALTER TABLE blocked_domains ADD COLUMN {name} {definition}");
+        let _ = connection.execute(&statement, []);
+    }
     connection
         .execute(
             "DELETE FROM activity_events
@@ -98,7 +115,7 @@ pub fn load_events(connection: &Connection) -> Result<Vec<crate::models::Activit
         .map_err(|error| format!("Unable to decode activity: {error}"))
 }
 
-pub fn ensure_blocklist(connection: &Connection) -> Result<Vec<String>, String> {
+pub fn ensure_blocklist(connection: &Connection) -> Result<Vec<BlocklistEntry>, String> {
     let count: usize = connection
         .query_row("SELECT COUNT(*) FROM blocked_domains", [], |row| row.get(0))
         .map_err(|error| format!("Unable to load blocklist count: {error}"))?;
@@ -110,13 +127,25 @@ pub fn ensure_blocklist(connection: &Connection) -> Result<Vec<String>, String> 
     }
 
     let mut statement = connection
-        .prepare("SELECT domain FROM blocked_domains ORDER BY domain ASC")
+        .prepare(
+            "SELECT domain, category, source, enabled, redirect, notes
+             FROM blocked_domains ORDER BY domain ASC",
+        )
         .map_err(|error| format!("Unable to load the blocklist: {error}"))?;
 
     let rows = statement
-        .query_map([], |row| row.get(0))
+        .query_map([], |row| {
+            Ok(BlocklistEntry {
+                domain: row.get(0)?,
+                category: row.get(1)?,
+                source: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                redirect: row.get(4)?,
+                notes: row.get(5)?,
+            })
+        })
         .map_err(|error| format!("Unable to read the blocklist: {error}"))?;
 
-    rows.collect::<Result<Vec<String>, _>>()
+    rows.collect::<Result<Vec<BlocklistEntry>, _>>()
         .map_err(|error| format!("Unable to decode the blocklist: {error}"))
 }
